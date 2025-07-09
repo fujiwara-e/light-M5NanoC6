@@ -1,0 +1,58 @@
+menu "Example Configuration"
+
+    config EXAMPLE_WIFI_SSID
+        string "WiFi SSID"
+        default "myssid"
+        help
+            SSID (network name) for the example to connect to.
+
+    config EXAMPLE_WIFI_PASSWORD
+        string "WiFi Password"
+        default "mypassword"
+        help
+            WiFi password (WPA or WPA2) for the example to use.
+
+    menu "Dynamic Passcode Configuration"
+        visible if CUSTOM_COMMISSIONABLE_DATA_PROVIDER
+
+    config DYNAMIC_PASSCODE_COMMISSIONABLE_DATA_PROVIDER
+        bool "Enable Dynamic Passcode Commissionable Data Provider"
+        depends on CUSTOM_COMMISSIONABLE_DATA_PROVIDER
+        default y
+
+    config DYNAMIC_PASSCODE_PROVIDER_DISCRIMINATOR
+        int "Discriminator in Dynamic Passcode Commissionable Data Provider"
+        depends on DYNAMIC_PASSCODE_COMMISSIONABLE_DATA_PROVIDER
+        default 3840
+        range 0 4095
+        help
+            Fixed discriminator in custom dynamic passcode commissionable data provider
+
+    config DYNAMIC_PASSCODE_PROVIDER_PASSCODE
+        int "Setup Passcode in Dynamic Passcode Commissionable Data Provider"
+        depends on DYNAMIC_PASSCODE_COMMISSIONABLE_DATA_PROVIDER
+        default 0
+        range 0 99999999
+        help
+            Fixed setup passcode in custom dynamic passcode commissionable data provider. 
+            If set to 0, a random passcode will be generated.
+            Valid range is 1-99999999 (excluding invalid patterns like 11111111, 22222222, etc.).
+
+    config DYNAMIC_PASSCODE_PROVIDER_ITERATIONS
+        int "Iterations in Dynamic Passcode Commissionable Data Provider"
+        depends on DYNAMIC_PASSCODE_COMMISSIONABLE_DATA_PROVIDER
+        default 10000
+        range 1000 100000
+        help
+            Fixed iterations in custom dynamic passcode commissionable data provider
+
+    config DYNAMIC_PASSCODE_PROVIDER_SALT_BASE64
+        string "Base64-Encoded Salt in Dynamic Passcode Commissionable Data Provider"
+        depends on DYNAMIC_PASSCODE_COMMISSIONABLE_DATA_PROVIDER
+        default "0NHS09TV1tfY2drb3N3e36ChoqOkpaanqKmqq6ytrq8="
+        help
+            Fixed salt in custom dynamic passcode commissionable data provider. It should be a Base64-Encoded string.
+
+    endmenu
+
+endmenu
