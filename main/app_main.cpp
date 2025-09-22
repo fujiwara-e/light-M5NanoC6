@@ -18,6 +18,11 @@
 #include <freertos/event_groups.h>
 #include <string.h>
 
+// DPP includes
+#include <esp_dpp.h>
+#include <esp_timer.h>
+#include <qrcode.h>
+
 #include <esp_matter.h>
 #include <esp_matter_console.h>
 #include <esp_matter_ota.h>
@@ -38,7 +43,28 @@
 static const char *TAG = "app_main";
 uint16_t light_endpoint_id = 0;
 
-// WiFi configuration
+// DPP configuration
+#ifdef CONFIG_ESP_DPP_LISTEN_CHANNEL_LIST
+#define EXAMPLE_DPP_LISTEN_CHANNEL_LIST CONFIG_ESP_DPP_LISTEN_CHANNEL_LIST
+#else
+#define EXAMPLE_DPP_LISTEN_CHANNEL_LIST "6"
+#endif
+
+#ifdef CONFIG_ESP_DPP_BOOTSTRAPPING_KEY
+#define EXAMPLE_DPP_BOOTSTRAPPING_KEY CONFIG_ESP_DPP_BOOTSTRAPPING_KEY
+#else
+#define EXAMPLE_DPP_BOOTSTRAPPING_KEY NULL
+#endif
+
+#ifdef CONFIG_ESP_DPP_DEVICE_INFO
+#define EXAMPLE_DPP_DEVICE_INFO CONFIG_ESP_DPP_DEVICE_INFO
+#else
+#define EXAMPLE_DPP_DEVICE_INFO NULL
+#endif
+
+#define CURVE_SEC256R1_PKEY_HEX_DIGITS 64
+
+// WiFi configuration - Legacy for fallback
 #define WIFI_SSID CONFIG_EXAMPLE_WIFI_SSID
 #define WIFI_PASS CONFIG_EXAMPLE_WIFI_PASSWORD
 #define WIFI_MAXIMUM_RETRY 10
@@ -47,15 +73,26 @@ uint16_t light_endpoint_id = 0;
 dynamic_commissionable_data_provider g_dynamic_passcode_provider;
 #endif
 
+// DPP and WiFi state variables
+wifi_config_t s_dpp_wifi_config = {0};
 static int s_retry_num = 0;
-static EventGroupHandle_t s_wifi_event_group;
+static EventGroupHandle_t s_wifi_event_group = NULL;
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
+#define DPP_AUTH_FAIL_BIT BIT2
+int64_t dpp_start_time = 0;
+static bool dpp_initialized = false;
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        esp_err_t ret = esp_supp_dpp_start_listen();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start DPP listen: %s", esp_err_to_name(ret));
+            xEventGroupSetBits(s_wifi_event_group, DPP_AUTH_FAIL_BIT);
+        } else {
+            ESP_LOGI(TAG, "Started listening for DPP Authentication");
+        }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         if (s_retry_num < WIFI_MAXIMUM_RETRY) {
             esp_wifi_connect();
@@ -73,47 +110,209 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     }
 }
 
+void dpp_enrollee_event_cb(esp_supp_dpp_event_t event, void *data)
+{
+    switch (event) {
+    case ESP_SUPP_DPP_URI_READY: {
+        int64_t uri_ready_time = esp_timer_get_time();
+        ESP_LOGI(TAG, "ESP_SUPP_DPP_URI_READY Time: %lld microseconds", uri_ready_time);
+        if (data != NULL) {
+            esp_qrcode_config_t cfg = ESP_QRCODE_CONFIG_DEFAULT();
+            ESP_LOGI(TAG, "DPP URI: %s", (const char *)data);
+            ESP_LOGI(TAG, "Scan below QR Code to configure the enrollee:\n");
+            esp_qrcode_generate(&cfg, (const char *)data);
+        } else {
+            ESP_LOGW(TAG, "DPP URI data is NULL");
+        }
+    } break;
+    case ESP_SUPP_DPP_CFG_RECVD: {
+        int64_t recv_cfg_result_time = esp_timer_get_time();
+        ESP_LOGI(TAG, "Recv DPP Configuration Result Time: %lld microseconds", recv_cfg_result_time);
+        if (data != NULL) {
+            memcpy(&s_dpp_wifi_config, data, sizeof(s_dpp_wifi_config));
+            esp_err_t ret = esp_wifi_set_config(WIFI_IF_STA, &s_dpp_wifi_config);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to set WiFi config: %s", esp_err_to_name(ret));
+                xEventGroupSetBits(s_wifi_event_group, DPP_AUTH_FAIL_BIT);
+                return;
+            }
+            ESP_LOGI(TAG, "DPP Authentication successful, connecting to AP : %s", s_dpp_wifi_config.sta.ssid);
+            s_retry_num = 0;
+            ret = esp_wifi_connect();
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to connect to WiFi: %s", esp_err_to_name(ret));
+            }
+        } else {
+            ESP_LOGE(TAG, "DPP configuration data is NULL");
+            xEventGroupSetBits(s_wifi_event_group, DPP_AUTH_FAIL_BIT);
+        }
+    } break;
+    case ESP_SUPP_DPP_FAIL: {
+        esp_err_t err = (esp_err_t)(intptr_t)data;
+        ESP_LOGE(TAG, "DPP Auth failed (Reason: %s), retry count: %d", esp_err_to_name(err), s_retry_num);
+
+        // Add delay between retries to avoid overwhelming the system
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        if (s_retry_num < 10) { // Reduce retry count to avoid infinite loops
+            esp_err_t ret = esp_supp_dpp_start_listen();
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to start DPP listen: %s", esp_err_to_name(ret));
+                xEventGroupSetBits(s_wifi_event_group, DPP_AUTH_FAIL_BIT);
+                return;
+            }
+            s_retry_num++;
+        } else {
+            ESP_LOGE(TAG, "DPP Authentication failed after %d retries, giving up", s_retry_num);
+            xEventGroupSetBits(s_wifi_event_group, DPP_AUTH_FAIL_BIT);
+        }
+        break;
+    }
+    default:
+        ESP_LOGW(TAG, "Unknown DPP event: %d", event);
+        break;
+    }
+}
+
+esp_err_t dpp_enrollee_bootstrap(void)
+{
+    esp_err_t ret;
+    size_t pkey_len = 0;
+    char *key = NULL;
+    const char *bootstrap_key = NULL;
+
+    ESP_LOGI(TAG, "DPP bootstrap configuration check:");
+    ESP_LOGI(TAG, "EXAMPLE_DPP_LISTEN_CHANNEL_LIST: %s", EXAMPLE_DPP_LISTEN_CHANNEL_LIST);
+#ifdef CONFIG_ESP_DPP_BOOTSTRAPPING_KEY
+    ESP_LOGI(TAG, "CONFIG_ESP_DPP_BOOTSTRAPPING_KEY is defined");
+#else
+    ESP_LOGI(TAG, "CONFIG_ESP_DPP_BOOTSTRAPPING_KEY is NOT defined");
+#endif
+
+    /* Check if EXAMPLE_DPP_BOOTSTRAPPING_KEY is defined and is a valid string */
+#ifdef CONFIG_ESP_DPP_BOOTSTRAPPING_KEY
+    bootstrap_key = CONFIG_ESP_DPP_BOOTSTRAPPING_KEY;
+    if (bootstrap_key != NULL && strlen(bootstrap_key) > 0) {
+        pkey_len = strlen(bootstrap_key);
+        ESP_LOGI(TAG, "Using configured bootstrapping key, length: %zu", pkey_len);
+    } else {
+        ESP_LOGI(TAG, "CONFIG_ESP_DPP_BOOTSTRAPPING_KEY is empty");
+        pkey_len = 0;
+    }
+#else
+    /* No bootstrapping key configured */
+    ESP_LOGI(TAG, "No bootstrapping key configured, DPP will generate random key");
+    pkey_len = 0;
+#endif
+
+    if (pkey_len && bootstrap_key != NULL) {
+        /* Currently only NIST P-256 curve is supported, add prefix/postfix accordingly */
+        char prefix[] = "30310201010420";
+        char postfix[] = "a00a06082a8648ce3d030107";
+
+        if (pkey_len != CURVE_SEC256R1_PKEY_HEX_DIGITS) {
+            ESP_LOGI(TAG, "Invalid key length! Private key needs to be 32 bytes (or 64 hex digits) long");
+            return ESP_FAIL;
+        }
+
+        key = (char *)malloc(sizeof(prefix) + pkey_len + sizeof(postfix));
+        if (!key) {
+            ESP_LOGI(TAG, "Failed to allocate for bootstrapping key");
+            return ESP_ERR_NO_MEM;
+        }
+        sprintf(key, "%s%s%s", prefix, bootstrap_key, postfix);
+        ESP_LOGI(TAG, "Formatted DER key prepared for DPP bootstrap");
+    } else {
+        ESP_LOGW(TAG, "No valid bootstrapping key found, QR code will be random each time");
+    }
+
+    /* Currently only supported method is QR Code */
+    ret = esp_supp_dpp_bootstrap_gen(EXAMPLE_DPP_LISTEN_CHANNEL_LIST, DPP_BOOTSTRAP_QR_CODE, key,
+                                     EXAMPLE_DPP_DEVICE_INFO);
+
+    if (key)
+        free(key);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to generate DPP bootstrap: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "DPP bootstrap generation successful");
+    return ret;
+}
+
 static void wifi_init_sta(void)
 {
+    dpp_start_time = esp_timer_get_time();
     s_wifi_event_group = xEventGroupCreate();
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_sta();
 
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
+
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-    ESP_ERROR_CHECK(
-        esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL,
-                                                        &instance_got_ip));
-
-    wifi_config_t wifi_config = {};
-    strcpy((char *)wifi_config.sta.ssid, WIFI_SSID);
-    strcpy((char *)wifi_config.sta.password, WIFI_PASS);
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-    wifi_config.sta.pmf_cfg.capable = true;
-    wifi_config.sta.pmf_cfg.required = false;
-
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+
+    // Initialize DPP with better error handling
+    if (!dpp_initialized) {
+        esp_err_t ret = esp_supp_dpp_init(dpp_enrollee_event_cb);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to initialize DPP: %s", esp_err_to_name(ret));
+            xEventGroupSetBits(s_wifi_event_group, DPP_AUTH_FAIL_BIT);
+            return;
+        }
+        dpp_initialized = true;
+
+        ret = dpp_enrollee_bootstrap();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to bootstrap DPP: %s", esp_err_to_name(ret));
+            esp_supp_dpp_deinit();
+            dpp_initialized = false;
+            xEventGroupSetBits(s_wifi_event_group, DPP_AUTH_FAIL_BIT);
+            return;
+        }
+    }
+
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "wifi_init_sta finished.");
+    /* Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed for the maximum
+     * number of re-tries (WIFI_FAIL_BIT). The bits are set by event_handler() (see above) */
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT | DPP_AUTH_FAIL_BIT,
+                                           pdFALSE, pdFALSE, portMAX_DELAY);
 
-    EventBits_t bits =
-        xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
-
+    /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually
+     * happened. */
     if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "connected to ap SSID:%s password:%s", WIFI_SSID, WIFI_PASS);
+        ESP_LOGI(TAG, "connected to ap SSID:%s password:%s", s_dpp_wifi_config.sta.ssid,
+                 s_dpp_wifi_config.sta.password);
     } else if (bits & WIFI_FAIL_BIT) {
-        ESP_LOGI(TAG, "Failed to connect to SSID:%s, password:%s", WIFI_SSID, WIFI_PASS);
+        ESP_LOGI(TAG, "Failed to connect to SSID:%s, password:%s", s_dpp_wifi_config.sta.ssid,
+                 s_dpp_wifi_config.sta.password);
+    } else if (bits & DPP_AUTH_FAIL_BIT) {
+        ESP_LOGI(TAG, "DPP Authentication failed after %d retries", s_retry_num);
     } else {
         ESP_LOGE(TAG, "UNEXPECTED EVENT");
     }
+
+    // Clean up DPP resources
+    if (dpp_initialized) {
+        esp_supp_dpp_deinit();
+        dpp_initialized = false;
+        ESP_LOGI(TAG, "DPP deinitialized successfully");
+    }
+
+    ESP_ERROR_CHECK(esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler));
+    ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler));
+    vEventGroupDelete(s_wifi_event_group);
+
+    int64_t end_time = esp_timer_get_time();
+    ESP_LOGI(TAG, "DPP wifi_init_sta execution time: %lld microseconds", end_time - dpp_start_time);
 }
 
 using namespace esp_matter;

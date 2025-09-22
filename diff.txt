@@ -1,0 +1,5 @@
+cp /home/fujiwara-e/git/light-M5NanoC6/main/app_main.cpp /home/fujiwara-e/git/esp-matter/work_space/dpp-matter-enrollee/main/app_main.cpp
+cp /home/fujiwara-e/git/light-M5NanoC6/main/custom_provider/dynamic_commissionable_data_provider.cpp /home/fujiwara-e/git/esp-matter/work_space/dpp-matter-enrollee/main/custom_provider/dynamic_commissionable_data_provider.cpp
+cp /home/fujiwara-e/git/light-M5NanoC6/managed_components/espressif__rmaker_common/include/esp_rmaker_utils.h /home/fujiwara-e/git/esp-matter/work_space/dpp-matter-enrollee/managed_components/espressif__rmaker_common/include/esp_rmaker_utils.h
+cp /home/fujiwara-e/git/light-M5NanoC6/managed_components/espressif__rmaker_common/src/esp-mqtt/esp-mqtt-glue.c /home/fujiwara-e/git/esp-matter/work_space/dpp-matter-enrollee/managed_components/espressif__rmaker_common/src/esp-mqtt/esp-mqtt-glue.c
+cp /home/fujiwara-e/git/light-M5NanoC6/managed_components/espressif__rmaker_common/src/utils.c /home/fujiwara-e/git/esp-matter/work_space/dpp-matter-enrollee/managed_components/espressif__rmaker_common/src/utils.c
