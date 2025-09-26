@@ -23,6 +23,10 @@
 #include <esp_timer.h>
 #include <qrcode.h>
 
+// HTTP client includes
+#include <esp_http_client.h>
+#include <cJSON.h>
+
 #include <esp_matter.h>
 #include <esp_matter_console.h>
 #include <esp_matter_ota.h>
@@ -42,6 +46,9 @@
 
 static const char *TAG = "app_main";
 uint16_t light_endpoint_id = 0;
+
+// Forward declaration for DPP message handler
+extern "C" void handle_dpp_message_event(const char *event_msg);
 
 // DPP configuration
 #ifdef CONFIG_ESP_DPP_LISTEN_CHANNEL_LIST
@@ -82,6 +89,218 @@ static EventGroupHandle_t s_wifi_event_group = NULL;
 #define DPP_AUTH_FAIL_BIT BIT2
 int64_t dpp_start_time = 0;
 static bool dpp_initialized = false;
+
+// Qrdia configuration variables
+static char *s_qrdia_api_url = NULL;
+static char *s_qrdia_device_id = NULL;
+static bool s_qrdia_callback_sent = false;
+
+// Function to call Qrdia online callback API
+static esp_err_t call_qrdia_online_callback(void)
+{
+    esp_err_t ret = ESP_OK;
+    esp_err_t err;
+    esp_http_client_config_t config = {0};
+    esp_http_client_handle_t client = NULL;
+    cJSON *json = NULL;
+    char *json_string = NULL;
+    char url[256];
+    
+    // Check if device_id is available from DPP
+    if (s_qrdia_device_id == NULL) {
+        ESP_LOGE(TAG, "Device ID not available from DPP configuration");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    // Construct the API URL using device_id from DPP and sdkconfig
+#ifdef CONFIG_API_BASE_URL
+    snprintf(url, sizeof(url), CONFIG_API_BASE_URL "/api/devices/%s/online-callback", s_qrdia_device_id);
+#else
+
+#endif
+    
+    ESP_LOGI(TAG, "Calling Qrdia API: %s", url);
+    
+    // Create JSON payload
+    json = cJSON_CreateObject();
+    if (json == NULL) {
+        ESP_LOGE(TAG, "Failed to create JSON object");
+        return ESP_ERR_NO_MEM;
+    }
+    
+    cJSON *status = cJSON_CreateString("success");
+    if (status == NULL) {
+        ESP_LOGE(TAG, "Failed to create JSON string");
+        cJSON_Delete(json);
+        return ESP_ERR_NO_MEM;
+    }
+    
+    cJSON_AddItemToObject(json, "status", status);
+    json_string = cJSON_Print(json);
+    if (json_string == NULL) {
+        ESP_LOGE(TAG, "Failed to print JSON");
+        cJSON_Delete(json);
+        return ESP_ERR_NO_MEM;
+    }
+    
+    // Configure HTTP client
+    config.url = url;
+    config.method = HTTP_METHOD_POST;
+    config.timeout_ms = 5000;
+    
+    client = esp_http_client_init(&config);
+    if (client == NULL) {
+        ESP_LOGE(TAG, "Failed to initialize HTTP client");
+        ret = ESP_FAIL;
+        goto cleanup;
+    }
+    
+    // Set headers
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    
+    // Set POST data
+    esp_http_client_set_post_field(client, json_string, strlen(json_string));
+    
+    // Perform HTTP request
+    err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        int status_code = esp_http_client_get_status_code(client);
+        int content_length = esp_http_client_get_content_length(client);
+        ESP_LOGI(TAG, "Qrdia API response: Status=%d, Content-Length=%d", status_code, content_length);
+        
+        if (status_code >= 200 && status_code < 300) {
+            ESP_LOGI(TAG, "Successfully notified Qrdia service about online status");
+        } else {
+            ESP_LOGW(TAG, "Qrdia API returned status code: %d", status_code);
+            ret = ESP_FAIL;
+        }
+    } else {
+        ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+        ret = err;
+    }
+    
+cleanup:
+    if (client) {
+        esp_http_client_cleanup(client);
+    }
+    if (json_string) {
+        free(json_string);
+    }
+    if (json) {
+        cJSON_Delete(json);
+    }
+    
+    return ret;
+}
+
+// Task to call Qrdia API after delay
+static void qrdia_callback_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "Waiting 2 seconds before calling Qrdia API...");
+    vTaskDelay(pdMS_TO_TICKS(2000));  // Wait 2 seconds for network stack to be ready
+    
+    esp_err_t qrdia_result = call_qrdia_online_callback();
+    if (qrdia_result == ESP_OK) {
+        ESP_LOGI(TAG, "Qrdia online callback sent successfully");
+    } else {
+        ESP_LOGW(TAG, "Failed to send Qrdia online callback: %s", esp_err_to_name(qrdia_result));
+    }
+    
+    // Delete this task
+    vTaskDelete(NULL);
+}
+
+// Function to handle Qrdia API URL
+static void handle_qrdia_api_url(const char *api_url)
+{
+    if (api_url == NULL) {
+        ESP_LOGW(TAG, "Qrdia API URL is NULL");
+        return;
+    }
+
+    // Free previous URL if exists
+    if (s_qrdia_api_url) {
+        free(s_qrdia_api_url);
+        s_qrdia_api_url = NULL;
+    }
+
+    // Store new URL
+    s_qrdia_api_url = strdup(api_url);
+    if (s_qrdia_api_url == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for Qrdia API URL");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Qrdia API URL received: %s", s_qrdia_api_url);
+    
+}
+
+// Function to handle Qrdia Device ID
+static void handle_qrdia_deviceid(const char *device_id)
+{
+    if (device_id == NULL) {
+        ESP_LOGW(TAG, "Qrdia Device ID is NULL");
+        return;
+    }
+
+    // Free previous device ID if exists
+    if (s_qrdia_device_id) {
+        free(s_qrdia_device_id);
+        s_qrdia_device_id = NULL;
+    }
+
+    // Store new device ID
+    s_qrdia_device_id = strdup(device_id);
+    if (s_qrdia_device_id == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for Qrdia Device ID");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Qrdia Device ID received and stored: %s", s_qrdia_device_id);
+}
+
+// WPA Supplicant message event handler (Alternative approach using custom DPP events)
+// This will be called from esp_dpp.c when Qrdia/Matter configurations are received
+extern "C" void handle_dpp_message_event(const char *event_msg)
+{
+    if (!event_msg) return;
+    
+    // Handle Qrdia URL event (with optional deviceid)
+    if (strstr(event_msg, "DPP-QRDIA-URL ")) {
+        const char *url = strstr(event_msg, "DPP-QRDIA-URL ") + 14; // Skip "DPP-QRDIA-URL "
+        char url_buffer[256] = {0};
+        char deviceid_buffer[128] = {0};
+        const char *deviceid_pos = strstr(url, " DEVICEID ");
+        if (deviceid_pos) {
+            size_t url_len = deviceid_pos - url;
+            if (url_len > 0 && url_len < sizeof(url_buffer)) {
+                strncpy(url_buffer, url, url_len);
+                url_buffer[url_len] = '\0';
+            }
+            // Extract deviceid
+            const char *id_val = deviceid_pos + 10; // Skip " DEVICEID "
+            strncpy(deviceid_buffer, id_val, sizeof(deviceid_buffer) - 1);
+            deviceid_buffer[sizeof(deviceid_buffer) - 1] = '\0';
+        } else {
+            // Only URL present
+            sscanf(url, "%255s", url_buffer);
+        }
+        handle_qrdia_api_url(url_buffer);
+        if (deviceid_buffer[0]) {
+            ESP_LOGI(TAG, "Qrdia DeviceID received: %s", deviceid_buffer);
+            handle_qrdia_deviceid(deviceid_buffer);
+        }
+    }
+    
+    // Handle Matter PIN event
+    if (strstr(event_msg, "DPP-MATTER-PIN ")) {
+        const char *pin = strstr(event_msg, "DPP-MATTER-PIN ") + 15; // Skip "DPP-MATTER-PIN "
+        char pin_buffer[32];
+        sscanf(pin, "%31s", pin_buffer); // Extract PIN safely
+        ESP_LOGI(TAG, "Matter PIN received: %s", pin_buffer);
+        // Handle Matter PIN as needed
+    }
+}
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
@@ -307,6 +526,10 @@ static void wifi_init_sta(void)
         ESP_LOGI(TAG, "DPP deinitialized successfully");
     }
 
+    // Note: Qrdia resources (s_qrdia_api_url, s_qrdia_device_id) are kept alive
+    // for later use by Matter event callbacks. They should be cleaned up when
+    // the application terminates or when no longer needed.
+
     ESP_ERROR_CHECK(esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler));
     ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler));
     vEventGroupDelete(s_wifi_event_group);
@@ -335,6 +558,16 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
     switch (event->Type) {
     case chip::DeviceLayer::DeviceEventType::kInterfaceIpAddressChanged:
         ESP_LOGI(TAG, "Interface IP Address changed");
+        
+        // Call Qrdia online callback API after interface IP address is stable
+        // Only if device_id was received from DPP configuration and not already sent
+        if (s_qrdia_device_id != NULL && !s_qrdia_callback_sent) {
+            s_qrdia_callback_sent = true;  // Prevent multiple executions
+            // Create task to handle API call with delay (non-blocking)
+            xTaskCreate(qrdia_callback_task, "qrdia_task", 4096, NULL, 5, NULL);
+        } else {
+            ESP_LOGI(TAG, "Device ID not available from DPP or callback already sent, skipping Qrdia callback");
+        }
         break;
 
     case chip::DeviceLayer::DeviceEventType::kCommissioningComplete:
