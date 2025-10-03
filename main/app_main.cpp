@@ -47,6 +47,7 @@ uint16_t light_endpoint_id = 0;
 dynamic_commissionable_data_provider g_dynamic_passcode_provider;
 #endif
 
+#if CONFIG_ENABLE_WIFI_STATION
 static int s_retry_num = 0;
 static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
@@ -115,6 +116,7 @@ static void wifi_init_sta(void)
         ESP_LOGE(TAG, "UNEXPECTED EVENT");
     }
 }
+#endif
 
 using namespace esp_matter;
 using namespace esp_matter::attribute;
@@ -237,8 +239,9 @@ extern "C" void app_main()
     nvs_flash_init();
 
     /* Initialize WiFi connection */
+#if CONFIG_ENABLE_WIFI_STATION
     wifi_init_sta();
-
+#endif
     /* Initialize driver */
     app_driver_handle_t light_handle = app_driver_light_init();
     app_driver_handle_t button_handle = app_driver_button_init();
