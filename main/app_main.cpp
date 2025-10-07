@@ -17,6 +17,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <string.h>
+#include <esp_http_server.h>
 
 #include <esp_matter.h>
 #include <esp_matter_console.h>
@@ -114,6 +115,40 @@ static void wifi_init_sta(void)
     } else {
         ESP_LOGE(TAG, "UNEXPECTED EVENT");
     }
+}
+
+/* HTTP Server */
+static esp_err_t test_get_handler(httpd_req_t *req)
+{
+    const char* resp_str = "{\"status\":\"ok\",\"message\":\"test endpoint\"}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp_str, strlen(resp_str));
+    return ESP_OK;
+}
+
+static const httpd_uri_t test_uri = {
+    .uri       = "/test",
+    .method    = HTTP_GET,
+    .handler   = test_get_handler,
+    .user_ctx  = NULL
+};
+
+static httpd_handle_t start_webserver(void)
+{
+    httpd_handle_t server = NULL;
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = 8000;
+    config.lru_purge_enable = true;
+
+    ESP_LOGI(TAG, "Starting HTTP server on port: %d", config.server_port);
+    if (httpd_start(&server, &config) == ESP_OK) {
+        httpd_register_uri_handler(server, &test_uri);
+        ESP_LOGI(TAG, "HTTP server started successfully");
+        return server;
+    }
+
+    ESP_LOGE(TAG, "Error starting HTTP server");
+    return NULL;
 }
 
 using namespace esp_matter;
@@ -238,6 +273,9 @@ extern "C" void app_main()
 
     /* Initialize WiFi connection */
     wifi_init_sta();
+
+    /* Start HTTP server */
+    start_webserver();
 
     /* Initialize driver */
     app_driver_handle_t light_handle = app_driver_light_init();
