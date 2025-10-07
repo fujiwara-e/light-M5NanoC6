@@ -118,7 +118,7 @@ static void wifi_init_sta(void)
 }
 
 /* HTTP Server */
-static esp_err_t test_get_handler(httpd_req_t *req)
+static esp_err_t connected_get_handler(httpd_req_t *req)
 {
     const char* resp_str = "{\"status\":\"ok\",\"message\":\"test endpoint\"}";
     httpd_resp_set_type(req, "application/json");
@@ -126,10 +126,10 @@ static esp_err_t test_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-static const httpd_uri_t test_uri = {
-    .uri       = "/test",
+static const httpd_uri_t connected_uri = {
+    .uri       = "/connected",
     .method    = HTTP_GET,
-    .handler   = test_get_handler,
+    .handler   = connected_get_handler,
     .user_ctx  = NULL
 };
 
@@ -142,7 +142,7 @@ static httpd_handle_t start_webserver(void)
 
     ESP_LOGI(TAG, "Starting HTTP server on port: %d", config.server_port);
     if (httpd_start(&server, &config) == ESP_OK) {
-        httpd_register_uri_handler(server, &test_uri);
+        httpd_register_uri_handler(server, &connected_uri);
         ESP_LOGI(TAG, "HTTP server started successfully");
         return server;
     }
