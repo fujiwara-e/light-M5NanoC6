@@ -30,7 +30,7 @@
 /** Default attribute values used during initialization */
 #define DEFAULT_POWER true
 #define DEFAULT_BRIGHTNESS 64
-#define DEFAULT_HUE 128
+#define DEFAULT_HUE 0
 #define DEFAULT_SATURATION 254
 
 typedef void *app_driver_handle_t;

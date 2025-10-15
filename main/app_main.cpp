@@ -28,6 +28,7 @@
 #include <app_reset.h>
 #include <common_macros.h>
 #include <driver/gpio.h>
+#include "bsp/esp-bsp.h"
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
 #endif
@@ -43,6 +44,9 @@ uint16_t light_endpoint_id = 0;
 #define WIFI_SSID CONFIG_EXAMPLE_WIFI_SSID
 #define WIFI_PASS CONFIG_EXAMPLE_WIFI_PASSWORD
 #define WIFI_MAXIMUM_RETRY 10
+
+// Flag to control Matter initialization
+static volatile bool g_matter_start_flag = false;
 
 #if CONFIG_DYNAMIC_PASSCODE_COMMISSIONABLE_DATA_PROVIDER
 dynamic_commissionable_data_provider g_dynamic_passcode_provider;
@@ -74,7 +78,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     }
 }
 
-static void wifi_init_sta(void)
+static EventBits_t wifi_init_sta(void)
 {
     s_wifi_event_group = xEventGroupCreate();
 
@@ -115,7 +119,12 @@ static void wifi_init_sta(void)
     } else {
         ESP_LOGE(TAG, "UNEXPECTED EVENT");
     }
+    
+    return bits;
 }
+
+// Global LED handle for HTTP handler
+static app_driver_handle_t g_light_handle = NULL;
 
 /* HTTP Server */
 static esp_err_t connected_get_handler(httpd_req_t *req)
@@ -123,6 +132,24 @@ static esp_err_t connected_get_handler(httpd_req_t *req)
     const char* resp_str = "{\"status\":\"ok\",\"message\":\"test endpoint\"}";
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp_str, strlen(resp_str));
+
+    ESP_LOGI(TAG, "GET /connected");
+
+#if CONFIG_BSP_LEDS_NUM > 0
+    if (g_light_handle != NULL) {
+        // Change to green: Hue = 120 degrees
+        uint32_t green_hsv = (120 << 16) | (255 << 8) | 64;
+        led_indicator_set_hsv((led_indicator_handle_t)g_light_handle, green_hsv);
+        ESP_LOGI(TAG, "LED changed to green");
+    }
+#endif
+
+    sleep(3);
+    
+    /* Set flag to allow Matter initialization to proceed */
+    g_matter_start_flag = true;
+    ESP_LOGI(TAG, "Matter start flag set to true");
+    
     return ESP_OK;
 }
 
@@ -271,16 +298,27 @@ extern "C" void app_main()
     /* Initialize the ESP NVS layer */
     nvs_flash_init();
 
+    /* Initialize light driver early to show red color */
+    app_driver_handle_t light_handle = app_driver_light_init();
+    g_light_handle = light_handle; // Store globally for HTTP handler
+    ESP_LOGI(TAG, "Light driver initialized (red color)");
+
+    /* Initialize button driver early (before waiting) */
+    app_driver_handle_t button_handle = app_driver_button_init();
+    app_reset_button_register(button_handle);
+
     /* Initialize WiFi connection */
     wifi_init_sta();
 
     /* Start HTTP server */
     start_webserver();
-
-    /* Initialize driver */
-    app_driver_handle_t light_handle = app_driver_light_init();
-    app_driver_handle_t button_handle = app_driver_button_init();
-    app_reset_button_register(button_handle);
+    
+    /* Wait until /connected endpoint is accessed */
+    ESP_LOGI(TAG, "Waiting for /connected endpoint to be accessed...");
+    while (!g_matter_start_flag) {
+        vTaskDelay(pdMS_TO_TICKS(2000)); // Wait for 100ms
+    }
+    ESP_LOGI(TAG, "Starting Matter initialization...");
 
     /* Create a Matter node and add the mandatory Root Node device type on endpoint 0 */
     node::config_t node_config;
@@ -289,20 +327,16 @@ extern "C" void app_main()
     node_t *node = node::create(&node_config, app_attribute_update_cb, app_identification_cb);
     ABORT_APP_ON_FAILURE(node != nullptr, ESP_LOGE(TAG, "Failed to create Matter node"));
 
-    /* For M5NanoC6  */
-    gpio_reset_pin(GPIO_NUM_19);
-    gpio_set_direction(GPIO_NUM_19, GPIO_MODE_OUTPUT);
-    gpio_set_level(GPIO_NUM_19, 1);
-
     extended_color_light::config_t light_config;
     light_config.on_off.on_off = DEFAULT_POWER;
     light_config.on_off.lighting.start_up_on_off = nullptr;
     light_config.level_control.current_level = DEFAULT_BRIGHTNESS;
     light_config.level_control.on_level = DEFAULT_BRIGHTNESS;
     light_config.level_control.lighting.start_up_current_level = DEFAULT_BRIGHTNESS;
-    light_config.color_control.color_mode = (uint8_t)ColorControl::ColorMode::kColorTemperature;
-    light_config.color_control.enhanced_color_mode = (uint8_t)ColorControl::ColorMode::kColorTemperature;
-    light_config.color_control.color_temperature.startup_color_temperature_mireds = nullptr;
+    light_config.color_control.color_mode = (uint8_t)ColorControl::ColorMode::kCurrentHueAndCurrentSaturation;
+    light_config.color_control.enhanced_color_mode = (uint8_t)ColorControl::ColorMode::kCurrentHueAndCurrentSaturation;
+    light_config.color_control.hue_saturation.current_hue = 85; // Green (120 degrees / 360 * 254 ≈ 85)
+    light_config.color_control.hue_saturation.current_saturation = 254; // Maximum saturation
 
     // endpoint handles can be used to add/modify clusters.
     endpoint_t *endpoint = extended_color_light::create(node, &light_config, ENDPOINT_FLAG_NONE, light_handle);
