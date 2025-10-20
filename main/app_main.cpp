@@ -135,10 +135,12 @@ static esp_err_t connected_get_handler(httpd_req_t *req)
 
     ESP_LOGI(TAG, "GET /connected");
 
+    sleep(3);
+
 #if CONFIG_BSP_LEDS_NUM > 0
     if (g_light_handle != NULL) {
         // Change to green: Hue = 120 degrees
-        uint32_t green_hsv = (120 << 16) | (255 << 8) | 64;
+        uint32_t green_hsv = (120 << 16) | (255 << 8) | 255;
         led_indicator_set_hsv((led_indicator_handle_t)g_light_handle, green_hsv);
         ESP_LOGI(TAG, "LED changed to green");
     }

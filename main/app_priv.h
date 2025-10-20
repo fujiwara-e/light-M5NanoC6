@@ -29,7 +29,7 @@
 
 /** Default attribute values used during initialization */
 #define DEFAULT_POWER true
-#define DEFAULT_BRIGHTNESS 64
+#define DEFAULT_BRIGHTNESS 254
 #define DEFAULT_HUE 0
 #define DEFAULT_SATURATION 254
 
